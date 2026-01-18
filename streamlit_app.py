@@ -15,27 +15,75 @@ def load_data():
     response = requests.get(SHEET_URL)
     data = response.json()
     full_df = pd.DataFrame(data[1:], columns=data[0])
-    required_cols = ["Deal owner", "Amount"]
-    df = full_df.loc[:, full_df.columns.intersection(required_cols)]
-    return df
+    return full_df
 
-df = load_data()
-df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+full_df = load_data()
 
 # =========================================================
 # 2) DASHBOARD TITLE
 # =========================================================
 
-st.title("📊 Incentive Dashboard - Person-specific Slabs")
+st.title("📊 Incentive Dashboard - Slab-wise + Course Targets")
 
 # =========================================================
-# 3) COMPLETE TABLE DATA WITH DIFFERENT SLABS FOR EACH PERSON
+# 3) FIND CORRECT COLUMNS
 # =========================================================
 
-# Directly from your table - ALL VALUES ARE NET REVENUE (after GST removal)
+# Clean column names
+full_df.columns = [str(col).strip() for col in full_df.columns]
+
+# Find required columns
+deal_owner_col = None
+amount_col = None
+close_date_col = None
+course_col = None
+
+for col in full_df.columns:
+    col_lower = str(col).lower()
+    if 'deal' in col_lower and 'owner' in col_lower:
+        deal_owner_col = col
+    elif 'amount' in col_lower or 'value' in col_lower:
+        amount_col = col
+    elif 'close' in col_lower and 'date' in col_lower:
+        close_date_col = col
+    elif 'course' in col_lower or 'product' in col_lower:
+        course_col = col
+
+# Use defaults if not found
+if not deal_owner_col and len(full_df.columns) > 0:
+    deal_owner_col = full_df.columns[0]
+if not amount_col and len(full_df.columns) > 1:
+    amount_col = full_df.columns[1]
+if not close_date_col and len(full_df.columns) > 2:
+    close_date_col = full_df.columns[2]
+if not course_col and len(full_df.columns) > 3:
+    course_col = full_df.columns[3]
+
+# Create TWO dataframes:
+# 1. For revenue calculation (ALL deals)
+# 2. For course count (only CLOSED deals)
+
+# ALL deals for revenue
+revenue_df = full_df[[deal_owner_col, amount_col]].copy()
+revenue_df.columns = ["Deal owner", "Amount"]
+revenue_df["Amount"] = pd.to_numeric(revenue_df["Amount"], errors="coerce")
+
+# CLOSED deals only for course count
+if close_date_col and course_col:
+    closed_df = full_df[[deal_owner_col, close_date_col, course_col]].copy()
+    closed_df.columns = ["Deal owner", "Close Date", "Course"]
+    # Filter for closed deals only
+    closed_df = closed_df[closed_df["Close Date"].notna() & (closed_df["Close Date"].astype(str).str.strip() != "")]
+else:
+    # If no close date column, use all deals for course count
+    closed_df = full_df[[deal_owner_col, course_col]].copy()
+    closed_df.columns = ["Deal owner", "Course"]
+
+# =========================================================
+# 4) TABLE DATA WITH DIFFERENT SLABS FOR EACH PERSON
+# =========================================================
+
 table_data = {
-    # Format: {name: [GST_Revenue, first_slab, first_incentive, second_slab, second_incentive, third_slab, third_incentive, fourth_slab]}
-    
     # TEAM 1
     "Nisha Samuel": [298690, 90000, 2100, 300000, 7050, 750000, 10290, 1020000],
     "Bindu -": [353694, 130000, 4900, 620000, 9520, 1040000, 15760, 1560000],
@@ -57,24 +105,24 @@ table_data = {
     "Merin j": [234160, 100000, 3200, 420000, 7710, 830000, 11430, 1140000]
 }
 
-# Progressive rates (SAME for everyone)
+# Progressive rates
 slab_rates = {1: 100, 2: 110, 3: 120, 4: 130}
 
 # =========================================================
-# 4) SUMMARIZE REVENUE FROM GOOGLE SHEET
+# 5) STEP 1: CALCULATE FIRST INCENTIVE (BASED ON TOTAL REVENUE)
 # =========================================================
 
-summary = df.groupby("Deal owner")["Amount"].sum().reset_index()
-summary.columns = ["Name", "Actual GST Revenue"]  # From Google Sheet
+st.header("💰 STEP 1: Calculate First Incentive (Based on TOTAL Revenue)")
 
-# Calculate NET Revenue (remove 18% GST)
-summary["Actual Net Revenue"] = np.floor(summary["Actual GST Revenue"] / 1.18)
-summary["GST Amount"] = summary["Actual GST Revenue"] - summary["Actual Net Revenue"]
+# Summarize ALL revenue (not just closed deals)
+summary = revenue_df.groupby("Deal owner")["Amount"].sum().reset_index()
+summary.columns = ["Name", "Total GST Revenue"]
 
-# =========================================================
-# 5) ADD TABLE DATA FOR COMPARISON
-# =========================================================
+# Calculate NET Revenue (remove 18% GST) - from ALL deals
+summary["Total Net Revenue"] = np.floor(summary["Total GST Revenue"] / 1.18)
+summary["GST Amount"] = summary["Total GST Revenue"] - summary["Total Net Revenue"]
 
+# Add table data for comparison
 def add_table_data(row):
     name = row["Name"]
     data = table_data.get(name, [0]*8)
@@ -94,56 +142,33 @@ def add_table_data(row):
 table_info = summary.apply(add_table_data, axis=1)
 summary = pd.concat([summary, table_info], axis=1)
 
-# =========================================================
-# 6) CORRECT INCENTIVE CALCULATION WITH DIFFERENT SLABS
-# =========================================================
-
+# Calculate slab-wise incentive based on TOTAL net revenue
 def calculate_incentive_different_slabs(row):
     name = row["Name"]
-    actual_net = row["Actual Net Revenue"]  # From Google Sheet
+    total_net = row["Total Net Revenue"]  # From ALL deals
     
-    # Get person's specific slab thresholds
     data = table_data.get(name, [0]*8)
-    first_slab = data[1]    # Person's first slab
-    first_inc_target = data[2]  # Incentive at second slab
-    second_slab = data[3]   # Person's second slab
-    second_inc_target = data[4] # Incentive at third slab
-    third_slab = data[5]    # Person's third slab
-    third_inc_target = data[6] # Incentive at fourth slab
-    fourth_slab = data[7]   # Person's fourth slab
+    first_slab = data[1]
+    second_slab = data[3]
+    third_slab = data[5]
+    fourth_slab = data[7]
     
-    # Initialize results
     incentive = 0
     current_slab = "Not Reached"
     
-    # Slab metrics
-    slab_details = {
-        "slab1_amount": 0, "slab1_blocks": 0, "slab1_inc": 0,
-        "slab2_amount": 0, "slab2_blocks": 0, "slab2_inc": 0,
-        "slab3_amount": 0, "slab3_blocks": 0, "slab3_inc": 0,
-        "slab4_amount": 0, "slab4_blocks": 0, "slab4_inc": 0
-    }
-    
     # Check if eligible
-    if actual_net < first_slab:
-        return incentive, current_slab, slab_details
+    if total_net < first_slab:
+        return incentive, current_slab
     
     # SLAB 1: First to Second slab
-    if actual_net < second_slab:
+    if total_net < second_slab:
         current_slab = "First Slab"
-        amount_in_slab1 = actual_net - first_slab
+        amount_in_slab1 = total_net - first_slab
         blocks_slab1 = math.floor(amount_in_slab1 / 10000)
-        inc_slab1 = blocks_slab1 * slab_rates[1]
-        incentive = inc_slab1
-        
-        slab_details.update({
-            "slab1_amount": amount_in_slab1,
-            "slab1_blocks": blocks_slab1,
-            "slab1_inc": inc_slab1
-        })
+        incentive = blocks_slab1 * slab_rates[1]
     
     # SLAB 2: Second to Third slab
-    elif actual_net < third_slab:
+    elif total_net < third_slab:
         current_slab = "Second Slab"
         
         # Slab 1 (full)
@@ -152,23 +177,14 @@ def calculate_incentive_different_slabs(row):
         slab1_inc = slab1_blocks * slab_rates[1]
         
         # Slab 2 (partial)
-        slab2_amount = actual_net - second_slab
+        slab2_amount = total_net - second_slab
         slab2_blocks = math.floor(slab2_amount / 10000)
         slab2_inc = slab2_blocks * slab_rates[2]
         
         incentive = slab1_inc + slab2_inc
-        
-        slab_details.update({
-            "slab1_amount": slab1_amount,
-            "slab1_blocks": slab1_blocks,
-            "slab1_inc": slab1_inc,
-            "slab2_amount": slab2_amount,
-            "slab2_blocks": slab2_blocks,
-            "slab2_inc": slab2_inc
-        })
     
     # SLAB 3: Third to Fourth slab
-    elif actual_net < fourth_slab:
+    elif total_net < fourth_slab:
         current_slab = "Third Slab"
         
         # Slab 1 (full)
@@ -182,23 +198,11 @@ def calculate_incentive_different_slabs(row):
         slab2_inc = slab2_blocks * slab_rates[2]
         
         # Slab 3 (partial)
-        slab3_amount = actual_net - third_slab
+        slab3_amount = total_net - third_slab
         slab3_blocks = math.floor(slab3_amount / 10000)
         slab3_inc = slab3_blocks * slab_rates[3]
         
         incentive = slab1_inc + slab2_inc + slab3_inc
-        
-        slab_details.update({
-            "slab1_amount": slab1_amount,
-            "slab1_blocks": slab1_blocks,
-            "slab1_inc": slab1_inc,
-            "slab2_amount": slab2_amount,
-            "slab2_blocks": slab2_blocks,
-            "slab2_inc": slab2_inc,
-            "slab3_amount": slab3_amount,
-            "slab3_blocks": slab3_blocks,
-            "slab3_inc": slab3_inc
-        })
     
     # SLAB 4: Above Fourth slab
     else:
@@ -220,352 +224,479 @@ def calculate_incentive_different_slabs(row):
         slab3_inc = slab3_blocks * slab_rates[3]
         
         # Slab 4 (partial)
-        slab4_amount = actual_net - fourth_slab
+        slab4_amount = total_net - fourth_slab
         slab4_blocks = math.floor(slab4_amount / 10000)
         slab4_inc = slab4_blocks * slab_rates[4]
         
         incentive = slab1_inc + slab2_inc + slab3_inc + slab4_inc
-        
-        slab_details.update({
-            "slab1_amount": slab1_amount,
-            "slab1_blocks": slab1_blocks,
-            "slab1_inc": slab1_inc,
-            "slab2_amount": slab2_amount,
-            "slab2_blocks": slab2_blocks,
-            "slab2_inc": slab2_inc,
-            "slab3_amount": slab3_amount,
-            "slab3_blocks": slab3_blocks,
-            "slab3_inc": slab3_inc,
-            "slab4_amount": slab4_amount,
-            "slab4_blocks": slab4_blocks,
-            "slab4_inc": slab4_inc
-        })
     
-    return incentive, current_slab, slab_details
+    return incentive, current_slab
 
 # Apply calculation
 results = summary.apply(calculate_incentive_different_slabs, axis=1, result_type='expand')
-results.columns = ["Incentive", "Current Slab", "Slab Details"]
-
+results.columns = ["First Incentive", "Current Slab"]
 summary = pd.concat([summary, results], axis=1)
 
-# Extract slab details
-details_df = pd.json_normalize(summary["Slab Details"])
-summary = pd.concat([summary, details_df], axis=1)
-
-# Calculate totals
-summary["Total Eligible Amount"] = (
-    summary["slab1_amount"] + summary["slab2_amount"] + 
-    summary["slab3_amount"] + summary["slab4_amount"]
-)
-summary["Total Blocks"] = (
-    summary["slab1_blocks"] + summary["slab2_blocks"] + 
-    summary["slab3_blocks"] + summary["slab4_blocks"]
-)
-
-# Status
-summary["Status"] = summary["Incentive"].apply(lambda x: "✅ Eligible" if x > 0 else "❌ Not Eligible")
+# Display first incentive
+st.subheader("First Incentive Based on TOTAL Revenue")
+st.dataframe(summary[["Name", "Total Net Revenue", "Current Slab", "First Incentive"]], 
+             use_container_width=True, hide_index=True)
 
 # =========================================================
-# 7) COMPREHENSIVE METRICS - SLAB WISE FOR EACH PERSON
+# 6) STEP 2: COUNT COURSE-WISE ADMISSIONS (CLOSED DEALS ONLY)
 # =========================================================
 
-st.subheader("📊 Overall Performance Metrics")
+st.header("🎯 STEP 2: Count Course-wise Admissions (CLOSED Deals Only)")
 
-# Row 1: Main KPIs
-col1, col2, col3, col4 = st.columns(4)
+# Define courses with their search patterns
+course_patterns = {
+    "OET": ["oet"],
+    "PTE": ["pte"],
+    "IELTS": ["ielts"],
+    "German": ["german", "deutsch"],
+    "Prometric": ["prometric"],
+    "Nclex-RN": ["nclex", "nclex-rn"],
+    "DM": ["digital marketing", "dm", "digital marketing full package"],
+    "Fluency": ["fluency"],
+    "Media": [
+        "media",
+        "diploma in cinematography and photography",
+        "diploma in editing & colour grading", 
+        "diploma in editing and colour grading",
+        "diploma in scriptwriting and direction",
+        "cinematography",
+        "photography",
+        "editing",
+        "colour grading",
+        "scriptwriting",
+        "direction"
+    ]
+}
 
-with col1:
-    st.metric("Total GST Revenue", f"₹{summary['Actual GST Revenue'].sum():,.0f}")
+target_per_course = 3
 
-with col2:
-    st.metric("Total Net Revenue", f"₹{summary['Actual Net Revenue'].sum():,.0f}")
+# Create a dictionary to store course counts and top performers
+course_top_performers = {}
+course_summary_data = []
 
-with col3:
-    st.metric("Total Incentive", f"₹{summary['Incentive'].sum():,.0f}")
-
-with col4:
-    eligible = (summary["Incentive"] > 0).sum()
-    st.metric("Eligible People", f"{eligible}/{len(summary)}")
-
-# Row 2: Slab Distribution
-st.subheader("📈 People in Each Slab")
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-with col1:
-    not_reached = (summary["Current Slab"] == "Not Reached").sum()
-    st.metric("Not Reached", not_reached)
-
-with col2:
-    in_first = (summary["Current Slab"] == "First Slab").sum()
-    st.metric("First Slab", in_first)
-
-with col3:
-    in_second = (summary["Current Slab"] == "Second Slab").sum()
-    st.metric("Second Slab", in_second)
-
-with col4:
-    in_third = (summary["Current Slab"] == "Third Slab").sum()
-    st.metric("Third Slab", in_third)
-
-with col5:
-    in_fourth = (summary["Current Slab"] == "Fourth Slab").sum()
-    st.metric("Fourth Slab", in_fourth)
-
-# Row 3: Total Blocks by Slab
-st.subheader("🧱 Total 10k Blocks Earned by Slab")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    total_slab1 = summary["slab1_blocks"].sum()
-    st.metric("First Slab Blocks", f"{total_slab1:,.0f}")
-
-with col2:
-    total_slab2 = summary["slab2_blocks"].sum()
-    st.metric("Second Slab Blocks", f"{total_slab2:,.0f}")
-
-with col3:
-    total_slab3 = summary["slab3_blocks"].sum()
-    st.metric("Third Slab Blocks", f"{total_slab3:,.0f}")
-
-with col4:
-    total_slab4 = summary["slab4_blocks"].sum()
-    st.metric("Fourth Slab Blocks", f"{total_slab4:,.0f}")
-
-# Row 4: Total Incentive by Slab
-st.subheader("💰 Total Incentive Earned by Slab")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    inc_slab1 = summary["slab1_inc"].sum()
-    st.metric("First Slab Incentive", f"₹{inc_slab1:,.0f}")
-
-with col2:
-    inc_slab2 = summary["slab2_inc"].sum()
-    st.metric("Second Slab Incentive", f"₹{inc_slab2:,.0f}")
-
-with col3:
-    inc_slab3 = summary["slab3_inc"].sum()
-    st.metric("Third Slab Incentive", f"₹{inc_slab3:,.0f}")
-
-with col4:
-    inc_slab4 = summary["slab4_inc"].sum()
-    st.metric("Fourth Slab Incentive", f"₹{inc_slab4:,.0f}")
-
-# =========================================================
-# 8) INDIVIDUAL SLAB COMPARISON TABLE
-# =========================================================
-
-st.subheader("🔍 Individual Slab Comparison")
-
-# Create comparison table
-comparison_data = []
-for name, data in table_data.items():
-    comparison_data.append({
-        "Name": name,
-        "First Slab": f"₹{data[1]:,.0f}",
-        "Second Slab": f"₹{data[3]:,.0f}",
-        "Third Slab": f"₹{data[5]:,.0f}",
-        "Fourth Slab": f"₹{data[7]:,.0f}",
-        "Max First Inc": f"₹{data[2]:,.0f}",
-        "Max Second Inc": f"₹{data[4]:,.0f}",
-        "Max Third Inc": f"₹{data[6]:,.0f}"
+# Count CLOSED admissions per course per person
+for course_name, patterns in course_patterns.items():
+    # Create a mask for this course using all patterns
+    course_mask = pd.Series(False, index=closed_df.index)
+    for pattern in patterns:
+        course_mask = course_mask | closed_df["Course"].astype(str).str.contains(pattern, case=False, na=False)
+    
+    course_counts = closed_df[course_mask].groupby("Deal owner").size().reset_index()
+    course_counts.columns = ["Name", f"{course_name}_Closed_Count"]
+    
+    # Merge with summary
+    summary = pd.merge(summary, course_counts, on="Name", how="left")
+    summary[f"{course_name}_Closed_Count"] = summary[f"{course_name}_Closed_Count"].fillna(0).astype(int)
+    
+    # Find top performer(s) for this course
+    if not course_counts.empty:
+        top_count = course_counts[f"{course_name}_Closed_Count"].max()
+        top_performers = course_counts[course_counts[f"{course_name}_Closed_Count"] == top_count]["Name"].tolist()
+        course_top_performers[course_name] = {"count": top_count, "names": top_performers}
+    
+    # Calculate course summary
+    total_admissions = course_counts[f"{course_name}_Closed_Count"].sum() if not course_counts.empty else 0
+    people_with_course = len(course_counts) if not course_counts.empty else 0
+    met_target = len(course_counts[course_counts[f"{course_name}_Closed_Count"] >= target_per_course]) if not course_counts.empty else 0
+    
+    course_summary_data.append({
+        "Course": course_name,
+        "Total Admissions": total_admissions,
+        "People with Course": people_with_course,
+        "Met Target (≥3)": met_target,
+        "Below Target": people_with_course - met_target,
+        "Top Performer Count": top_count if not course_counts.empty else 0,
+        "Top Performers": ", ".join(top_performers) if not course_counts.empty else "None"
     })
 
-comparison_df = pd.DataFrame(comparison_data)
+# Display course counts with emoji indicators
+st.subheader("📊 Closed Deals Count (Course-wise)")
 
-# Split into Team 1 and Team 2
-team1_names = ["Nisha Samuel", "Bindu -", "Remya Raghunath", "Jibymol Varghese", 
-               "akhila shaji", "Geethu Babu", "parvathy R", "Arya S"]
-
-comparison_df["Team"] = comparison_df["Name"].apply(lambda x: "Team 1" if x in team1_names else "Team 2")
-
-col1, col2 = st.columns(2)
-with col1:
-    st.write("**Team 1 Slabs**")
-    team1_df = comparison_df[comparison_df["Team"] == "Team 1"].drop(columns=["Team"])
-    st.dataframe(team1_df, use_container_width=True, hide_index=True)
-
-with col2:
-    st.write("**Team 2 Slabs**")
-    team2_df = comparison_df[comparison_df["Team"] == "Team 2"].drop(columns=["Team"])
-    st.dataframe(team2_df, use_container_width=True, hide_index=True)
-
-# =========================================================
-# 9) INDIVIDUAL DETAILED CALCULATIONS
-# =========================================================
-
-st.subheader("👤 Individual Detailed Calculations with Different Slabs")
-
+# Create display dataframe with emojis
+course_display_data = []
 for idx, row in summary.iterrows():
-    with st.expander(f"{row['Name']} - Slab: {row['Current Slab']} | Incentive: ₹{row['Incentive']:,.0f}"):
-        
-        # Revenue comparison
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.write("**Actual Revenue (Google Sheet):**")
-            st.write(f"GST Revenue: ₹{row['Actual GST Revenue']:,.0f}")
-            st.write(f"Net Revenue: ₹{row['Actual Net Revenue']:,.0f}")
+    person_data = {"Name": row["Name"]}
+    
+    for course_name in course_patterns.keys():
+        count = row[f"{course_name}_Closed_Count"]
+        if count > 0:
+            # Check if target met
+            target_met = count >= target_per_course
             
-        with col2:
-            st.write("**Table Reference (from your data):**")
-            st.write(f"GST Revenue in Table: ₹{row['Table GST Revenue']:,.0f}")
-            st.write(f"Net Revenue in Table: ₹{row['Table Net Revenue']:,.0f}")
-        
-        # Person's specific slabs
-        st.write("**This Person's Slab Structure:**")
-        cols = st.columns(4)
-        with cols[0]:
-            st.metric("First Slab", f"₹{row['First Slab']:,.0f}")
-        with cols[1]:
-            st.metric("Second Slab", f"₹{row['Second Slab']:,.0f}")
-        with cols[2]:
-            st.metric("Third Slab", f"₹{row['Third Slab']:,.0f}")
-        with cols[3]:
-            st.metric("Fourth Slab", f"₹{row['Fourth Slab']:,.0f}")
-        
-        # Calculation breakdown
-        st.write("**Incentive Calculation Breakdown:**")
-        
-        breakdown_data = []
-        if row["slab1_inc"] > 0:
-            breakdown_data.append({
-                "Slab": "First",
-                "Threshold": f"₹{row['First Slab']:,.0f} - ₹{row['Second Slab']:,.0f}",
-                "Eligible Amount": f"₹{row['slab1_amount']:,.0f}",
-                "10k Blocks": row["slab1_blocks"],
-                "Rate": "₹100",
-                "Incentive": f"₹{row['slab1_inc']:,.0f}"
-            })
-        
-        if row["slab2_inc"] > 0:
-            breakdown_data.append({
-                "Slab": "Second",
-                "Threshold": f"₹{row['Second Slab']:,.0f} - ₹{row['Third Slab']:,.0f}",
-                "Eligible Amount": f"₹{row['slab2_amount']:,.0f}",
-                "10k Blocks": row["slab2_blocks"],
-                "Rate": "₹110",
-                "Incentive": f"₹{row['slab2_inc']:,.0f}"
-            })
-        
-        if row["slab3_inc"] > 0:
-            breakdown_data.append({
-                "Slab": "Third",
-                "Threshold": f"₹{row['Third Slab']:,.0f} - ₹{row['Fourth Slab']:,.0f}",
-                "Eligible Amount": f"₹{row['slab3_amount']:,.0f}",
-                "10k Blocks": row["slab3_blocks"],
-                "Rate": "₹120",
-                "Incentive": f"₹{row['slab3_inc']:,.0f}"
-            })
-        
-        if row["slab4_inc"] > 0:
-            breakdown_data.append({
-                "Slab": "Fourth",
-                "Threshold": f"Above ₹{row['Fourth Slab']:,.0f}",
-                "Eligible Amount": f"₹{row['slab4_amount']:,.0f}",
-                "10k Blocks": row["slab4_blocks"],
-                "Rate": "₹130",
-                "Incentive": f"₹{row['slab4_inc']:,.0f}"
-            })
-        
-        if breakdown_data:
-            breakdown_df = pd.DataFrame(breakdown_data)
-            st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+            # Check if top performer
+            is_top = False
+            if course_name in course_top_performers:
+                if row["Name"] in course_top_performers[course_name]["names"]:
+                    is_top = True
             
-            st.success(f"**Total Incentive = ₹{row['Incentive']:,.0f}**")
+            # Create display string with emojis
+            display_text = f"{count}"
+            if is_top:
+                display_text += " 🏆"  # Trophy for top performer
+            if target_met:
+                display_text += " ✅"   # Green tick for target met
+            else:
+                display_text += " ❌"   # Red X for target not met
+            
+            person_data[course_name] = display_text
         else:
-            st.write(f"Net Revenue (₹{row['Actual Net Revenue']:,.0f}) below first slab (₹{row['First Slab']:,.0f})")
-            st.write("**No incentive earned**")
+            person_data[course_name] = "0"
+    
+    course_display_data.append(person_data)
+
+course_display_df = pd.DataFrame(course_display_data)
+st.dataframe(course_display_df, use_container_width=True, hide_index=True)
+
+# Display course summary
+st.subheader("📈 Course-wise Summary")
+
+course_summary_df = pd.DataFrame(course_summary_data)
+st.dataframe(course_summary_df, use_container_width=True, hide_index=True)
 
 # =========================================================
-# 10) MAIN SUMMARY TABLE
+# 7) STEP 3: APPLY 11% PENALTY/REWARD PER COURSE (WITH TIE HANDLING)
 # =========================================================
 
-st.subheader("📋 Complete Summary Table")
+st.header("💰 STEP 3: Apply Course Penalty/Reward (11% of First Incentive)")
 
-display_cols = [
+# Initialize columns
+summary["Total_Penalty"] = 0.0
+summary["Total_Reward"] = 0.0
+summary["Final_Incentive"] = summary["First Incentive"].copy()
+
+# Store detailed penalty/reward info
+penalty_reward_details = {}
+
+# Apply penalty per course
+for course_name in course_patterns.keys():
+    # Add columns for this course
+    summary[f"{course_name}_Penalty"] = 0.0
+    summary[f"{course_name}_Reward"] = 0.0
+    
+    # Get people with this course (who have at least 1 closed deal)
+    course_people = summary[summary[f"{course_name}_Closed_Count"] > 0].copy()
+    
+    if len(course_people) > 0:
+        # Find below target people (< 3 closed deals)
+        below_target = course_people[course_people[f"{course_name}_Closed_Count"] < target_per_course]
+        
+        if len(below_target) > 0:
+            # Find ALL top performers (max closed deals count)
+            max_count = course_people[f"{course_name}_Closed_Count"].max()
+            top_performers = course_people[course_people[f"{course_name}_Closed_Count"] == max_count]["Name"].tolist()
+            
+            # Apply 11% penalty to below-target people
+            total_penalty = 0.0
+            penalty_details = []
+            
+            for _, person in below_target.iterrows():
+                name = person["Name"]
+                penalty_amount = person["First Incentive"] * 0.11
+                
+                # Apply penalty
+                mask = summary["Name"] == name
+                summary.loc[mask, f"{course_name}_Penalty"] = penalty_amount
+                summary.loc[mask, "Total_Penalty"] += penalty_amount
+                summary.loc[mask, "Final_Incentive"] -= penalty_amount
+                
+                total_penalty += penalty_amount
+                penalty_details.append({
+                    "person": name,
+                    "count": person[f"{course_name}_Closed_Count"],
+                    "penalty": penalty_amount,
+                    "first_incentive": person["First Incentive"]
+                })
+            
+            # Split penalty equally among ALL top performers
+            if total_penalty > 0 and len(top_performers) > 0:
+                reward_per_person = total_penalty / len(top_performers)
+                
+                for top_name in top_performers:
+                    if top_name in summary["Name"].values:
+                        top_mask = summary["Name"] == top_name
+                        summary.loc[top_mask, f"{course_name}_Reward"] = reward_per_person
+                        summary.loc[top_mask, "Total_Reward"] += reward_per_person
+                        summary.loc[top_mask, "Final_Incentive"] += reward_per_person
+                
+                # Store details for display
+                penalty_reward_details[course_name] = {
+                    "total_penalty": total_penalty,
+                    "top_performers": top_performers,
+                    "reward_per_person": reward_per_person,
+                    "penalty_details": penalty_details,
+                    "max_count": max_count
+                }
+
+# Calculate net adjustment
+summary["Net_Adjustment"] = summary["Total_Reward"] - summary["Total_Penalty"]
+
+# Display tie-case handling examples
+st.subheader("🎯 Tie-Case Handling Examples")
+
+if penalty_reward_details:
+    for course_name, details in penalty_reward_details.items():
+        if len(details["top_performers"]) > 1:  # Only show if there's a tie
+            st.write(f"**{course_name} Course - Tie Case Example:**")
+            
+            # Show top performers
+            st.write(f"🏆 **Top Performers ({len(details['top_performers'])} people tied):**")
+            for i, top_name in enumerate(details["top_performers"], 1):
+                st.write(f"  {i}. {top_name} - {details['max_count']} closed deals")
+            
+            # Show penalty details
+            st.write(f"💰 **Penalties Collected:** ₹{details['total_penalty']:,.2f}")
+            for penalty_detail in details["penalty_details"]:
+                st.write(f"  - {penalty_detail['person']}: {penalty_detail['count']} deals → 11% of ₹{penalty_detail['first_incentive']:,.0f} = ₹{penalty_detail['penalty']:,.2f}")
+            
+            # Show reward distribution
+            st.write(f"🎁 **Reward Distribution (split equally):**")
+            st.write(f"  Each top performer gets: ₹{details['total_penalty']:,.2f} ÷ {len(details['top_performers'])} = ₹{details['reward_per_person']:,.2f}")
+            
+            st.write("---")
+
+# =========================================================
+# 8) DISPLAY FINAL RESULTS
+# =========================================================
+
+st.header("🏆 FINAL RESULTS")
+
+# Final summary table
+final_cols = [
     "Name", 
-    "Actual Net Revenue", 
-    "Current Slab",
-    "First Slab", "Second Slab", "Third Slab", "Fourth Slab",
-    "slab1_blocks", "slab1_inc",
-    "slab2_blocks", "slab2_inc",
-    "slab3_blocks", "slab3_inc",
-    "slab4_blocks", "slab4_inc",
-    "Incentive", 
-    "Status"
+    "Total Net Revenue",
+    "First Incentive",
+    "Total_Penalty",
+    "Total_Reward",
+    "Net_Adjustment",
+    "Final_Incentive"
 ]
 
-summary_display = summary[display_cols].copy()
-summary_display.columns = [
-    "Name", "Net Revenue", "Current Slab",
-    "1st Slab", "2nd Slab", "3rd Slab", "4th Slab",
-    "1st Blocks", "1st Inc",
-    "2nd Blocks", "2nd Inc",
-    "3rd Blocks", "3rd Inc",
-    "4th Blocks", "4th Inc",
-    "Total Incentive", "Status"
+final_display = summary[final_cols].copy()
+final_display.columns = [
+    "Name",
+    "Total Net Revenue",
+    "First Incentive",
+    "Total Penalties",
+    "Total Rewards",
+    "Net Adjustment",
+    "Final Incentive"
 ]
 
 st.dataframe(
-    summary_display,
+    final_display,
     use_container_width=True,
     hide_index=True,
     column_config={
-        "Net Revenue": st.column_config.NumberColumn(format="₹%d"),
-        "1st Slab": st.column_config.NumberColumn(format="₹%d"),
-        "2nd Slab": st.column_config.NumberColumn(format="₹%d"),
-        "3rd Slab": st.column_config.NumberColumn(format="₹%d"),
-        "4th Slab": st.column_config.NumberColumn(format="₹%d"),
-        "1st Inc": st.column_config.NumberColumn(format="₹%d"),
-        "2nd Inc": st.column_config.NumberColumn(format="₹%d"),
-        "3rd Inc": st.column_config.NumberColumn(format="₹%d"),
-        "4th Inc": st.column_config.NumberColumn(format="₹%d"),
-        "Total Incentive": st.column_config.NumberColumn(format="₹%d"),
+        "Total Net Revenue": st.column_config.NumberColumn(format="₹%d"),
+        "First Incentive": st.column_config.NumberColumn(format="₹%d"),
+        "Total Penalties": st.column_config.NumberColumn(format="₹%d"),
+        "Total Rewards": st.column_config.NumberColumn(format="₹%d"),
+        "Net Adjustment": st.column_config.NumberColumn(format="₹%d"),
+        "Final Incentive": st.column_config.NumberColumn(format="₹%d"),
     }
 )
 
 # =========================================================
-# 11) EXAMPLES OF DIFFERENT SLABS
+# 9) DETAILED COURSE-WISE ADJUSTMENTS
 # =========================================================
 
-st.subheader("📝 Examples Showing Different Slabs")
+st.subheader("📊 Detailed Course-wise Adjustments")
 
-examples = pd.DataFrame([
+for idx, row in summary.iterrows():
+    # Check if person has any course data or penalties/rewards
+    has_course_data = any([row[f"{course}_Closed_Count"] > 0 for course in course_patterns.keys()])
+    has_adjustments = row["Total_Penalty"] > 0 or row["Total_Reward"] > 0
+    
+    if has_course_data or has_adjustments:
+        with st.expander(f"{row['Name']} - First: ₹{row['First Incentive']:,.0f} | Final: ₹{row['Final_Incentive']:,.0f}"):
+            
+            # Basic info
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Revenue & Incentive:**")
+                st.write(f"Total Net Revenue: ₹{row['Total Net Revenue']:,.0f}")
+                st.write(f"First Incentive: ₹{row['First Incentive']:,.0f}")
+                st.write(f"Total Penalties: ₹{row['Total_Penalty']:,.0f}")
+                st.write(f"Total Rewards: ₹{row['Total_Reward']:,.0f}")
+                st.write(f"**Final Incentive: ₹{row['Final_Incentive']:,.0f}**")
+            
+            with col2:
+                st.write("**Closed Deals Count:**")
+                course_data = []
+                for course_name in course_patterns.keys():
+                    count = row[f"{course_name}_Closed_Count"]
+                    if count > 0:
+                        # Check if target met
+                        target_met = count >= target_per_course
+                        
+                        # Check if top performer
+                        is_top = False
+                        if course_name in course_top_performers:
+                            if row["Name"] in course_top_performers[course_name]["names"]:
+                                is_top = True
+                        
+                        status = ""
+                        if is_top:
+                            status += "🏆 "  # Trophy for top performer
+                        if target_met:
+                            status += "✅"   # Green tick for target met
+                        else:
+                            status += "❌"   # Red X for target not met
+                        
+                        course_data.append(f"{course_name}: {count} {status}")
+                
+                if course_data:
+                    for data in course_data:
+                        st.write(data)
+                else:
+                    st.write("No closed deals recorded")
+            
+            # Show penalties and rewards by course
+            adjustments = []
+            for course_name in course_patterns.keys():
+                penalty = row[f"{course_name}_Penalty"]
+                reward = row[f"{course_name}_Reward"]
+                
+                if penalty > 0:
+                    adjustments.append({
+                        "Course": course_name,
+                        "Type": "Penalty (11%)",
+                        "Amount": f"-₹{penalty:,.0f}",
+                        "Reason": f"Below target ({row[f'{course_name}_Closed_Count']} < {target_per_course})"
+                    })
+                elif reward > 0:
+                    adjustments.append({
+                        "Course": course_name,
+                        "Type": "Reward",
+                        "Amount": f"+₹{reward:,.0f}",
+                        "Reason": "Top performer in course"
+                    })
+            
+            if adjustments:
+                st.write("**Course-wise Adjustments:**")
+                adjustments_df = pd.DataFrame(adjustments)
+                st.dataframe(adjustments_df, use_container_width=True, hide_index=True)
+
+# =========================================================
+# 10) COURSE DEFINITIONS AND TARGET EXPLANATION
+# =========================================================
+
+st.subheader("📚 Course Definitions & Media Courses Included")
+
+course_definitions = pd.DataFrame([
     {
-        "Person": "Nisha Samuel",
-        "Slabs": "90,000 → 300,000 → 750,000 → 1,020,000",
-        "At 300,000 NET": "21 blocks × ₹100 = ₹2,100",
-        "At 750,000 NET": "₹2,100 + (45×₹110=₹4,950) = ₹7,050"
+        "Course": "OET",
+        "Definition": "Occupational English Test",
+        "Target": "≥3 closed deals"
     },
     {
-        "Person": "Aneena",
-        "Slabs": "90,000 → 400,000 → 800,000 → 1,080,000",
-        "At 400,000 NET": "31 blocks × ₹100 = ₹3,100",
-        "At 619,246 NET": "₹3,100 + (21×₹110=₹2,310) = ₹5,410"
+        "Course": "PTE", 
+        "Definition": "Pearson Test of English",
+        "Target": "≥3 closed deals"
     },
     {
-        "Person": "Bindu",
-        "Slabs": "130,000 → 620,000 → 1,040,000 → 1,560,000",
-        "At 620,000 NET": "49 blocks × ₹100 = ₹4,900",
-        "At 1,040,000 NET": "₹4,900 + (42×₹110=₹4,620) = ₹9,520"
+        "Course": "IELTS",
+        "Definition": "International English Language Testing System",
+        "Target": "≥3 closed deals"
     },
     {
-        "Person": "Remya Raghunath",
-        "Slabs": "110,000 → 460,000 → 900,000 → 1,260,000",
-        "At 460,000 NET": "35 blocks × ₹100 = ₹3,500",
-        "At 900,000 NET": "₹3,500 + (44×₹110=₹4,840) = ₹8,340"
+        "Course": "German",
+        "Definition": "German Language Courses",
+        "Target": "≥3 closed deals"
+    },
+    {
+        "Course": "Prometric",
+        "Definition": "Prometric Exam Preparation",
+        "Target": "≥3 closed deals"
+    },
+    {
+        "Course": "Nclex-RN",
+        "Definition": "NCLEX-RN Exam Preparation",
+        "Target": "≥3 closed deals"
+    },
+    {
+        "Course": "DM",
+        "Definition": "Digital Marketing Full Package",
+        "Target": "≥3 closed deals"
+    },
+    {
+        "Course": "Fluency",
+        "Definition": "Fluency Development Programs",
+        "Target": "≥3 closed deals"
+    },
+    {
+        "Course": "Media",
+        "Definition": "Includes: Diploma in Cinematography & Photography, Diploma in Editing & Colour Grading, Diploma in Scriptwriting & Direction",
+        "Target": "≥3 closed deals (combined)"
     }
 ])
 
-st.dataframe(examples, use_container_width=True, hide_index=True)
+st.dataframe(course_definitions, use_container_width=True, hide_index=True)
+
+st.info("""
+**📊 Display Legend:**
+- **🏆 Trophy** = Top performer in that course (most closed deals) - can be multiple people
+- **✅ Green Tick** = Met target (≥3 closed deals)
+- **❌ Red X** = Below target (<3 closed deals)
+- **0** = No closed deals in that course
+
+**TIE CASE HANDLING:**
+- When multiple people have same highest count, ALL get 🏆 trophy
+- Penalty money is split EQUALLY among all top performers
+- Example: 2 people tied with 9 count, 1 person with 2 count → Penalty split 50/50
+""")
 
 # =========================================================
-# 12) DOWNLOAD
+# 11) OVERALL METRICS
+# =========================================================
+
+st.subheader("📈 Overall Metrics")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    st.metric("Total First Incentive", f"₹{summary['First Incentive'].sum():,.0f}")
+
+with col2:
+    total_penalty = summary['Total_Penalty'].sum()
+    st.metric("Total Penalties", f"₹{total_penalty:,.0f}")
+
+with col3:
+    total_reward = summary['Total_Reward'].sum()
+    st.metric("Total Rewards", f"₹{total_reward:,.0f}")
+
+with col4:
+    st.metric("Final Total Incentive", f"₹{summary['Final_Incentive'].sum():,.0f}")
+
+# Course target metrics
+st.subheader("🎯 Course Target Achievement")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+    total_closed = sum([summary[f"{course}_Closed_Count"].sum() for course in course_patterns.keys()])
+    st.metric("Total Closed Deals", f"{total_closed}")
+
+with col2:
+    total_met = sum([(summary[f"{course}_Closed_Count"] >= target_per_course).sum() for course in course_patterns.keys()])
+    st.metric("Total Met Targets", f"{total_met}")
+
+with col3:
+    total_below = sum([((summary[f"{course}_Closed_Count"] > 0) & (summary[f"{course}_Closed_Count"] < target_per_course)).sum() for course in course_patterns.keys()])
+    st.metric("Total Below Targets", f"{total_below}")
+
+with col4:
+    total_top = len(set([name for course in course_top_performers.values() for name in course["names"]]))
+    st.metric("Top Performers", f"{total_top}")
+
+# =========================================================
+# 12) DOWNLOAD FINAL REPORT
 # =========================================================
 
 @st.cache_data
@@ -577,44 +708,66 @@ csv = convert_df(summary)
 st.download_button(
     label="📥 Download Full Report",
     data=csv,
-    file_name="incentive_different_slabs.csv",
+    file_name="final_incentive_report.csv",
     mime="text/csv"
 )
 
 # =========================================================
-# 13) FINAL VALIDATION
+# 13) LOGIC SUMMARY
 # =========================================================
 
-st.subheader("✅ Final Validation - Different Slabs Confirmed")
+st.subheader("✅ FINAL LOGIC IMPLEMENTED")
 
-st.info("""
-**CORRECT UNDERSTANDING FINALIZED:**
+st.success("""
+**TWO-STEP CALCULATION COMPLETE:**
 
-✅ **Each person has DIFFERENT slab thresholds:**
-- Nisha: 90K → 300K → 750K → 1,020K
-- Aneena: 90K → 400K → 800K → 1,080K  
-- Bindu: 130K → 620K → 1,040K → 1,560K
-- Remya R.: 110K → 460K → 900K → 1,260K
+**STEP 1: Calculate First Incentive (Slab-wise)**
+- Based on TOTAL revenue (ALL deals, not just closed)
+- Different slabs for each person
+- Progressive rates: ₹100 → ₹110 → ₹120 → ₹130 per ₹10,000 block
+- Uses NET Revenue (GST removed)
 
-✅ **Same progressive rates for everyone:**
-- First Slab: ₹100 per ₹10,000 NET above person's first slab
-- Second Slab: ₹110 per ₹10,000 NET above person's second slab
-- Third Slab: ₹120 per ₹10,000 NET above person's third slab
-- Fourth Slab: ₹130 per ₹10,000 NET above person's fourth slab
+**STEP 2: Apply Course Penalty/Reward (11% of First Incentive)**
+- **Target:** 3 CLOSED deals per course
+- **Below target (<3 closed):** Lose 11% of First Incentive
+- **Top performer(s):** Gets ALL penalties from below-target
+- **TIE CASE:** When multiple people have same max count → ALL get penalty split EQUALLY
+- **Met target (≥3 closed, not top):** No penalty, no reward
+- Applied separately for EACH course
 
-✅ **Table values are verification points at exact slab thresholds**
-✅ **Uses NET Revenue (after GST removal)**
-✅ **Only full ₹10,000 blocks count**
+**TIE CASE EXAMPLE:**
+- Person A: 9 count, First Incentive ₹10,000
+- Person B: 9 count, First Incentive ₹8,000 (TIE with A)
+- Person C: 2 count, First Incentive ₹6,000
 
-**Example Calculations Verified:**
-- Nisha at ₹300,000: 21 × ₹100 = ₹2,100 ✓
-- Aneena at ₹619,246: ₹3,100 + ₹2,310 = ₹5,410 ✓
-- Bindu at ₹1,040,000: ₹4,900 + ₹4,620 = ₹9,520 ✓
+**Calculation:**
+1. Person C penalty = ₹6,000 × 11% = ₹660
+2. Total penalty = ₹660
+3. 2 top performers → Each gets ₹660 ÷ 2 = ₹330
+4. **Results:** 
+   - Person A: ₹10,000 + ₹330 = ₹10,330 🏆
+   - Person B: ₹8,000 + ₹330 = ₹8,330 🏆
+   - Person C: ₹6,000 - ₹660 = ₹5,340 ❌
 """)
 
 # =========================================================
-# 14) RAW DATA
+# 14) RAW DATA VIEW
 # =========================================================
 
-with st.expander("📁 View Raw Google Sheet Data"):
-    st.dataframe(df, use_container_width=True)
+with st.expander("📁 View Raw Data"):
+    tab1, tab2 = st.tabs(["All Deals (Revenue)", "Closed Deals (Count)"])
+    
+    with tab1:
+        st.write("**All Deals for Revenue Calculation:**")
+        st.dataframe(revenue_df, use_container_width=True)
+    
+    with tab2:
+        st.write("**Closed Deals for Course Count:**")
+        st.dataframe(closed_df, use_container_width=True)
+        
+        # Show course matching examples
+        st.write("**Course Pattern Matching Examples:**")
+        for course_name, patterns in course_patterns.items():
+            sample_matches = closed_df[closed_df["Course"].astype(str).str.contains(patterns[0], case=False, na=False)]["Course"].unique()[:3]
+            if len(sample_matches) > 0:
+                st.write(f"{course_name}: {', '.join(sample_matches[:3])}")
